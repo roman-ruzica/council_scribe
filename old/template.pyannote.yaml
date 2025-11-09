@@ -1,0 +1,170 @@
+# AWS SAM template for Slovak Transcription Tool with pyannoteAI API
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Description: Slovak Video/Audio Transcription Tool with pyannoteAI API
+
+Globals:
+  Function:
+    Timeout: 900  # 15 minutes - maximum Lambda timeout
+    MemorySize: 8192  # 8GB - reduced since no local diarization models
+
+Parameters:
+  PyannoteApiKey:
+    Type: String
+    Description: pyannoteAI API key
+    NoEcho: true
+
+  S3BucketName:
+    Type: String
+    Default: slovak-transcription-temp-files
+    Description: S3 bucket name for temporary audio files
+
+Resources:
+  # S3 bucket for temporary audio file storage
+  TempAudioBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${S3BucketName}-${AWS::AccountId}"
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteTempFilesAfter1Hour
+            Status: Enabled
+            ExpirationInDays: 1
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt CleanupFunction.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: temp-audio/
+
+  # IAM role for Lambda function
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3AccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:GeneratePresignedUrl
+                Resource: !Sub "${TempAudioBucket}/*"
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !Sub "${TempAudioBucket}"
+
+  # Main transcription function
+  SlovakTranscriptionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: slovak-transcription-tool-pyannote-api
+      PackageType: Image
+      ImageUri: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/slovak-transcription-pyannote:latest
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          PYANNOTE_API_KEY: !Ref PyannoteApiKey
+          S3_BUCKET_NAME: !Ref TempAudioBucket
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /transcribe
+            Method: post
+            RequestModel:
+              Model: TranscriptionRequest
+              Required: true
+
+  # Cleanup function to delete old temp files
+  CleanupFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: slovak-transcription-cleanup
+      Runtime: python3.11
+      Handler: cleanup.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      InlineCode: |
+        import boto3
+        import json
+        import logging
+
+        logger = logging.getLogger()
+        logger.setLevel(logging.INFO)
+
+        s3 = boto3.client('s3')
+
+        def lambda_handler(event, context):
+            # This function is triggered by S3 events and can perform cleanup
+            # For now, we rely on lifecycle policies for cleanup
+            logger.info("Cleanup function triggered")
+            return {'statusCode': 200}
+
+  # ECR Repository for container images
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: slovak-transcription-pyannote
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 5 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 5
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+
+Outputs:
+  ApiGatewayUrl:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/transcribe"
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiUrl"
+
+  ECRRepositoryUri:
+    Description: ECR Repository URI
+    Value: !GetAtt ECRRepository.RepositoryUri
+    Export:
+      Name: !Sub "${AWS::StackName}-ECRRepo"
+
+  S3BucketName:
+    Description: S3 bucket for temporary files
+    Value: !Ref TempAudioBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-S3Bucket"

@@ -1,0 +1,19 @@
+[project]
+name = "council-scribe"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "openai-whisper",
+    "python-dotenv",
+    "yt-dlp",
+    "fastapi[standard]",
+    "mangum",
+]
+
+[dependency-groups]
+dev = [
+    # In development mode, include the FastAPI development server.
+    "fastapi[standard]",
+]
